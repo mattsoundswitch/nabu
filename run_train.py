@@ -25,7 +25,7 @@ def main(_):
 
     #pointers to the config files
     computing_cfg_file = 'config/computing/non-distributed.cfg'
-    database_cfg_file = 'config/asr_databases/TIMIT.conf'
+    database_cfg_file = 'config/asr_databases/aurora4.conf'
     if FLAGS.type == 'asr':
         feat_cfg_file = 'config/features/fbank.cfg'
     classifier_cfg_file = 'config/asr/LAS.cfg'

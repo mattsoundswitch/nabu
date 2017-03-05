@@ -6,7 +6,7 @@ from six.moves import configparser
 from nabu.processing.target_normalizers import normalizer_factory
 
 #pointer to the confif file
-database_cfg_file = 'config/lm_databases/TIMIT.conf'
+database_cfg_file = 'config/lm_databases/aurora4.conf'
 
 #read the database config file
 database_cfg = configparser.ConfigParser()

@@ -44,7 +44,7 @@ class LmConfidenceDecoder(decoder.Decoder):
                 logit = split_logits[i][:logit_seq_length[i]]
 
                 #append an end of sequence label
-                starget = tf.concat(0, [target, [output_dim-1]])
+                starget = tf.concat([target, [output_dim-1]], 0)
 
                 #one hot encode the targets
                 #pylint: disable=E1101

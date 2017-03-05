@@ -118,8 +118,7 @@ class BeamSearchDecoder(decoder.Decoder):
         negmax = tf.tile(
             [[-tf.float32.max]],
             [self.batch_size, int(self.conf['beam_width'])-1])
-        scores = tf.concat(
-            1, [tf.zeros([self.batch_size, 1]), negmax])
+        scores = tf.concat([tf.zeros([self.batch_size, 1]), negmax], 1)
         lengths = tf.ones(
             [self.batch_size, int(self.conf['beam_width'])],
             dtype=tf.int32)
@@ -256,10 +255,9 @@ class Beam(namedtuple('Beam', ['sequences', 'lengths', 'states', 'scores'])):
 
                 #set the scores of expanded beams from finished elements to
                 #negative maximum [batch_size x beam_width*numlabels]
-                expanded_finished = tf.reshape(tf.concat(
-                    2, [tf.tile([[[False]]], [batch_size, beam_width, 1]),
+                expanded_finished = tf.reshape(tf.concat([tf.tile([[[False]]], [batch_size, beam_width, 1]),
                         tf.tile(tf.expand_dims(finished, 2),
-                                [1, 1, numlabels-1])])
+                                [1, 1, numlabels-1])], 2)
                                                , [batch_size, -1])
 
                 scores = tf.select(
@@ -342,7 +340,7 @@ class Beam(namedtuple('Beam', ['sequences', 'lengths', 'states', 'scores'])):
 
                 #construct the new sequences by adding the selected labels
                 labels = tf.expand_dims(labels, 2)
-                sequences = tf.concat(2, [real, labels, padding])
+                sequences = tf.concat([real, labels, padding], 2)
 
                 #specify the shape of the sequences
                 sequences.set_shape([batch_size, beam_width, max_steps])

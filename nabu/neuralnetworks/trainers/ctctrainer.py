@@ -38,10 +38,9 @@ class CTCTrainer(trainer.Trainer):
             batch_size = int(targets.get_shape()[0])
 
             #convert the targets into a sparse tensor representation
-            indices = tf.concat(0, [tf.concat(
-                1, [tf.expand_dims(tf.tile([s], [target_seq_length[s]]), 1),
-                    tf.expand_dims(tf.range(target_seq_length[s]), 1)])
-                                    for s in range(batch_size)])
+            indices = tf.concat([tf.concat([tf.expand_dims(tf.tile([s], [target_seq_length[s]]), 1),
+                    tf.expand_dims(tf.range(target_seq_length[s]), 1)], 1)
+                                    for s in range(batch_size)], 0)
 
             values = tf.reshape(
                 ops.seq2nonseq(targets, target_seq_length), [-1])
