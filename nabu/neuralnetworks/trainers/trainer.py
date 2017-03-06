@@ -5,7 +5,6 @@ import os
 from abc import ABCMeta, abstractmethod
 from time import time, sleep
 import tensorflow as tf
-from tensorflow.python.client.device_lib import list_local_devices
 import numpy as np
 
 class Trainer(object):
@@ -21,9 +20,8 @@ class Trainer(object):
                  val_reader,
                  val_targets,
                  expdir,
-                 server=None,
-                 cluster=None,
-                 task_index=0):
+                 server,
+                 task_index):
         '''
         NnetTrainer constructor, creates the training graph
 
@@ -34,15 +32,12 @@ class Trainer(object):
             input_dim: the input dimension to the nnnetgraph
             num_steps: the total number of steps that will be taken
             dispenser: a Batchdispenser object
-            cluster: the optional cluster used for distributed training, it
-                should contain at least one parmeter server and one worker
             val_reader: the feature reader for the validation data if None
                 validation will not be used
             val_targets: a dictionary containing the targets of the validation
                 set
             expdir: directory where the summaries will be written
             server: optional server to be used for distributed training
-            cluster: optional cluster to be used for distributed training
             task_index: optional index of the worker task in the cluster
         '''
 
@@ -55,7 +50,7 @@ class Trainer(object):
 
         self.expdir = expdir
         self.server = server
-        self.cluster = cluster
+        cluster = tf.train.ClusterSpec(server.server_def.cluster)
 
         #save the max lengths
         self.max_target_length = dispenser.max_target_length
@@ -64,28 +59,16 @@ class Trainer(object):
         #create the graph
         self.graph = tf.Graph()
 
-        if cluster is None:
-            #non distributed training
-            is_chief = True
+        if 'local' in cluster.as_dict():
             num_replicas = 1
-
-            #choose a GPU if it is available otherwise take a CPU
-            local_device_protos = (list_local_devices())
-            gpu = [x.name for x in local_device_protos
-                   if x.device_type == 'GPU']
-            if len(gpu) > 0:
-                device = str(gpu[0])
-            else:
-                device = str(local_device_protos[0].name)
-
         else:
             #distributed training
             num_replicas = len(cluster.as_dict()['worker'])
-            numservers = len(cluster.as_dict()['ps'])
-            is_chief = task_index == 0
-            device = tf.train.replica_device_setter(
-                worker_device="/job:worker/task:%d" % task_index,
-                cluster=cluster)
+
+        self.is_chief = task_index == 0
+        device = tf.train.replica_device_setter(
+            cluster=cluster,
+            worker_device='/job:worker/task:%d' % task_index)
 
         #define the placeholders in the graph
         with self.graph.as_default():
@@ -137,7 +120,8 @@ class Trainer(object):
                     is_training=True)
 
                 #create a saver for the classifier
-                self.modelsaver = tf.train.Saver(tf.trainable_variables())
+                self.modelsaver = tf.train.Saver(tf.trainable_variables(),
+                                                 sharded=True)
 
                 #create a decoder object for validation
                 if self.conf['validation_mode'] == 'decode':
@@ -157,28 +141,16 @@ class Trainer(object):
                     raise Exception('unknown validation mode %s' %
                                     self.conf['validation_mode'])
 
-                if cluster is not None:
-                    #create a done queue for each parameter server
-                    done_queues = []
-                    for ps in range(numservers):
-                        with tf.device("/job:ps/task:%d" % (ps)):
-                            done_queues.append(tf.FIFOQueue(
-                                capacity=num_replicas,
-                                dtypes=tf.int32,
-                                shared_name='done_queue' + str(ps)))
 
-                    #create an operation that enqueues an element in each done
-                    #queue
-                    self.done = tf.group(*[q.enqueue(0) for q in done_queues])
-
-                else:
-                    self.done = tf.no_op()
+                #a variable to hold the amount of steps already taken
+                self.global_step = tf.get_variable(
+                    name='global_step',
+                    shape=[],
+                    dtype=tf.int32,
+                    initializer=tf.constant_initializer(0),
+                    trainable=False)
 
                 with tf.variable_scope('train'):
-                    #a variable to hold the amount of steps already taken
-                    self.global_step = tf.get_variable(
-                        'global_step', [], dtype=tf.int32,
-                        initializer=tf.constant_initializer(0), trainable=False)
 
                     #a variable that indicates if features are being read
                     self.reading = tf.get_variable(
@@ -230,6 +202,8 @@ class Trainer(object):
                     self.set_val_loss = self.val_loss.assign(
                         self.val_loss_in).op
 
+
+
                     #a variable to scale the learning rate (used to reduce the
                     #learning rate in case validation performance drops)
                     learning_rate_fact = tf.get_variable(
@@ -256,11 +230,12 @@ class Trainer(object):
 
                     #create an optimizer that aggregates gradients
                     if int(conf['numbatches_to_aggregate']) > 0:
-                        optimizer = tf.train.SyncReplicasOptimizerV2(
+                        optimizer = tf.train.SyncReplicasOptimizer(
                             opt=optimizer,
                             replicas_to_aggregate=int(
                                 conf['numbatches_to_aggregate']),
                             total_num_replicas=num_replicas)
+
 
                     #compute the loss
                     self.loss = self.compute_loss(
@@ -275,6 +250,7 @@ class Trainer(object):
                         grads = [(tf.clip_by_value(grad, -1., 1.), var)
                                  for grad, var in grads]
 
+
                     #opperation to apply the gradients
                     apply_gradients_op = optimizer.apply_gradients(
                         grads_and_vars=grads,
@@ -286,28 +262,9 @@ class Trainer(object):
 
                     #create an operation to update the gradients, the batch_loss
                     #and do all other update ops
-                    #pylint: disable=E1101
                     self.update_op = tf.group(
                         *([apply_gradients_op] + update_ops),
                         name='update')
-
-                # add an operation to initialise all the variables in the graph
-                self.init_op = tf.global_variables_initializer()
-
-                #operations to initialise the token queue
-                if int(conf['numbatches_to_aggregate']) > 0:
-                    self.init_token_op = optimizer.get_init_tokens_op()
-                    self.chief_queue_runner = optimizer.get_chief_queue_runner()
-                    ready_for_local_init_op = optimizer.ready_for_local_init_op
-                    if is_chief:
-                        local_init_op = optimizer.chief_init_op
-                    else:
-                        local_init_op = optimizer.local_step_init_op
-                else:
-                    self.init_token_op = tf.no_op()
-                    self.chief_queue_runner = None
-                    ready_for_local_init_op = tf.no_op()
-                    local_init_op = tf.no_op()
 
                 #create the summaries for visualisation
                 tf.summary.scalar('validation loss', self.val_loss)
@@ -317,24 +274,11 @@ class Trainer(object):
                 for param in tf.trainable_variables():
                     tf.summary.histogram(param.name, param)
 
+                #create the schaffold
+                self.scaffold = tf.train.Scaffold()
 
-                #saver for the training network
-                self.trainsaver = tf.train.Saver()
-
-        #create the supervisor
-        self.supervisor = tf.train.Supervisor(
-            graph=self.graph,
-            ready_for_local_init_op=ready_for_local_init_op,
-            is_chief=is_chief,
-            init_op=self.init_op,
-            local_init_op=local_init_op,
-            logdir=self.expdir + '/logdir',
-            saver=self.trainsaver,
-            global_step=self.global_step)
-
-        #specify that the graph can no longer be modified after this point
-        self.graph.finalize()
-
+                #finalize
+                self.scaffold.finalize()
     @abstractmethod
     def compute_loss(self, targets, logits, logit_seq_length,
                      target_seq_length):
@@ -364,33 +308,28 @@ class Trainer(object):
         '''train the model'''
 
         #look for the master if distributed training is done
-        if self.server is None:
-            master = ''
-        else:
-            master = self.server.target
+        master = self.server.target
 
         #start the session and standart servises
         config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True #pylint: disable=E1101
-        config.allow_soft_placement = True
+        config.gpu_options.allow_growth = True
+        #config.allow_soft_placement = True
+        #config.log_device_placement = True
 
-        with self.supervisor.managed_session(master, config=config) as sess:
+        with self.graph.as_default():
+            with tf.train.MonitoredTrainingSession(
+                master=master,
+                is_chief=self.is_chief,
+                checkpoint_dir=os.path.join(self.expdir, 'logdir'),
+                scaffold=self.scaffold,
+                config=config) as sess:
 
-            #start the queue runners
-            if self.chief_queue_runner is not None:
-                self.supervisor.start_queue_runners(
-                    sess=sess,
-                    queue_runners=[self.chief_queue_runner])
+                #set the reading flag to false
+                sess.run(self.release_reader)
 
-            #fill the queue with initial tokens
-            sess.run(self.init_token_op)
-
-            #set the reading flag to false
-            sess.run(self.release_reader)
-
-            #start the training loop
-            with self.supervisor.stop_on_exception():
-                while (not self.supervisor.should_stop()
+                #start the training loop
+                #pylint: disable=E1101
+                while (not sess.should_stop()
                        and self.global_step.eval(sess) < self.num_steps):
 
                     #check if validation is due
@@ -405,6 +344,7 @@ class Trainer(object):
                     start = time()
 
                     #wait until the reader is free
+                    #pylint: disable=E1101
                     while self.reading.eval(sess):
                         sleep(1)
 
@@ -412,6 +352,7 @@ class Trainer(object):
                     sess.run(self.block_reader)
 
                     #read a batch of data
+                    #pylint: disable=E1101
                     batch_data, batch_labels = self.dispenser.get_batch(
                         self.pos.eval(sess))
 
@@ -432,7 +373,7 @@ class Trainer(object):
                             loss, lr, time()-start))
 
                 #the chief will create the final model
-                if self.supervisor.is_chief:
+                if self.is_chief:
                     if not os.path.isdir(os.path.join(self.expdir, 'model')):
                         os.mkdir(os.path.join(self.expdir, 'model'))
 
@@ -440,11 +381,6 @@ class Trainer(object):
                     self.modelsaver.save(
                         sess, os.path.join(self.expdir, 'model', 'network.ckpt')
                         )
-
-                #notify the parameter server that he worker has terminated
-                sess.run(self.done)
-
-                self.supervisor.request_stop()
 
     def update(self, inputs, targets, sess):
         '''
@@ -472,7 +408,6 @@ class Trainer(object):
         padded_inputs = np.array(pad(inputs, self.max_input_length))
         padded_targets = np.array(pad(targets, self.max_target_length))
 
-        #pylint: disable=E1101
         _, loss, lr = sess.run(
             fetches=[self.update_op,
                      self.loss,
@@ -513,6 +448,7 @@ class Trainer(object):
 
         print 'validation loss: %f' % val_loss
 
+        #pylint: disable=E1101
         if (val_loss > self.val_loss.eval(session=sess)
                 and self.conf['valid_adapt'] == 'True'):
             print 'halving learning rate'
@@ -557,7 +493,7 @@ class Trainer(object):
             inputs += [np.zeros([0, feat_dim])]*(
                 self.dispenser.size-len(inputs))
             labels += [np.zeros([0])]*(
-                self.dispenser.size-len(inputs))
+                self.dispenser.size-len(labels))
 
             #get the sequence length
             input_seq_length = [inp.shape[0] for inp in inputs]
@@ -571,7 +507,6 @@ class Trainer(object):
                 lab, np.zeros([self.max_target_length-lab.shape[0]]), 0)
                                      for lab in labels])
 
-            #pylint: disable=E1101
             loss = sess.run(
                 self.decoder_loss,
                 feed_dict={self.inputs:input_tensor,
@@ -603,30 +538,3 @@ def pad(inputs, length):
                      for i in inputs]
 
     return padded_inputs
-
-def wait(server, task_index, numworkers):
-    '''wait for the workers to finish
-
-    Args:
-        server: the Tensorflow server
-        task_index: the ps task_index
-        numworkers: total number of workers
-    '''
-
-    print 'waiting for workers to finish'
-
-    graph = tf.Graph()
-    with graph.as_default():
-        with tf.device("/job:ps/task:%d" % (task_index)):
-            done_queue = tf.FIFOQueue(
-                capacity=numworkers,
-                dtypes=tf.int32,
-                shared_name='done_queue' + str(task_index))
-            dequeue_op = done_queue.dequeue()
-
-    graph.finalize()
-
-    with tf.Session(target=server.target, graph=graph) as sess:
-        for i in range(numworkers):
-            sess.run(dequeue_op)
-            print '%d/%d workers have finished' % (i+1, numworkers)

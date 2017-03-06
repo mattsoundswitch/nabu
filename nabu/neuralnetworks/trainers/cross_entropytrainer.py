@@ -42,7 +42,8 @@ class CrossEntropyTrainer(trainer.Trainer):
                 split_targets[i] = target[:target_seq_length[i]]
 
                 #append an end of sequence label
-                split_targets[i] = tf.concat([split_targets[i], [output_dim-1]], 0)
+                split_targets[i] = tf.concat(
+                    [split_targets[i], [output_dim-1]], 0)
 
             #concatenate the targets
             nonseq_targets = tf.concat(split_targets, 0)

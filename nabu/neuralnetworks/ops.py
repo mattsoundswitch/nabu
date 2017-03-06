@@ -187,7 +187,7 @@ def nonseq2seq(tensor, seq_length, length, name=None):
         for seq in sequences:
             seq.set_shape([length, int(tensor.get_shape()[1])])
 
-        #pack the sequences into a tensor
-        sequential = tf.pack(sequences)
+        #stack the sequences into a tensor
+        sequential = tf.stack(sequences)
 
     return sequential

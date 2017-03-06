@@ -83,15 +83,15 @@ def main(_):
 
         if FLAGS.type == 'asr':
             train_asr(clusterfile=None,
-                      job_name=None,
-                      task_index=None,
-                      ssh_tunnel=False,
+                      job_name='local',
+                      task_index=0,
+                      ssh_command='None',
                       expdir=FLAGS.expdir)
         else:
             train_lm(clusterfile=None,
-                     job_name=None,
-                     task_index=None,
-                     ssh_tunnel=False,
+                     job_name='local',
+                     task_index=0,
+                     ssh_command='None',
                      expdir=FLAGS.expdir)
 
     elif computing_cfg['distributed'] == 'local':
@@ -141,10 +141,10 @@ def main(_):
             task_index = 0
             for machine in machines[job]:
                 command = ('python -u train_%s.py --clusterfile=%s '
-                           '--job_name=%s --task_index=%d --ssh_tunnel=%s '
+                           '--job_name=%s --task_index=%d --ssh_command=%s '
                            '--expdir=%s') % (
                                FLAGS.type, computing_cfg['clusterfile'], job,
-                               task_index, computing_cfg['ssh_tunnel'],
+                               task_index, computing_cfg['ssh_command'],
                                FLAGS.expdir)
                 processes[job].append(run_remote.run_remote(
                     command=command,
@@ -161,12 +161,9 @@ def main(_):
         atexit.register(kill_processes.kill_processes,
                         processdir=os.path.join(FLAGS.expdir, 'processes'))
 
-        #wait for all processes to finish
-        for job in processes:
-            for process in processes[job]:
-                process.wait()
-
-
+        #wait for all worker processes to finish
+        for process in processes['worker']:
+            process.wait()
 
     elif computing_cfg['distributed'] == 'condor':
 
@@ -181,7 +178,7 @@ def main(_):
         subprocess.call(['condor_submit', 'expdir=%s' % FLAGS.expdir,
                          'numjobs=%s' % computing_cfg['numps'],
                          'type=%s' % FLAGS.type,
-                         'ssh_tunnel=%s' % computing_cfg['ssh_tunnel'],
+                         'ssh_command=%s' % computing_cfg['ssh_command'],
                          'nabu/distributed/condor/ps.job'])
 
         #submit the worker jobs
@@ -189,7 +186,7 @@ def main(_):
                          'numjobs=%s' % computing_cfg['numworkers'],
                          'memory=%s' % computing_cfg['minmemory'],
                          'type=%s' % FLAGS.type,
-                         'ssh_tunnel=%s' % computing_cfg['ssh_tunnel'],
+                         'ssh_command=%s' % computing_cfg['ssh_command'],
                          'nabu/distributed/condor/worker.job'])
 
         ready = False
@@ -233,7 +230,21 @@ def main(_):
 
             #check if enough machines are available
             if len(machines['worker']) == 0 or len(machines['ps']) == 0:
-                os.system('condor_rm -all')
+
+                #stop the ps jobs
+                cidfile = os.path.join(FLAGS.expdir, 'cluster', 'ps-cid')
+                if os.path.exists(cidfile):
+                    with open(cidfile) as fid:
+                        cid = fid.read()
+                    subprocess.call(['condor_rm', cid])
+
+                #stop the worker jobs
+                cidfile = os.path.join(FLAGS.expdir, 'cluster', 'worker-cid')
+                if os.path.exists(cidfile):
+                    with open(cidfile) as fid:
+                        cid = fid.read()
+                    subprocess.call(['condor_rm', cid])
+
                 raise Exception('at leat one ps and one worker needed')
 
 
@@ -244,19 +255,13 @@ def main(_):
         with open(os.path.join(FLAGS.expdir, 'cluster', 'cluster'),
                   'w') as cfid:
             for job in machines:
-                task_index = 0
                 if job == 'ps':
                     GPU = ''
                 else:
                     GPU = '0'
                 for machine in machines[job]:
-                    with open(FLAGS.expdir + '/cluster/%s-%s'
-                              % (machine[0], machine[1]), 'w') as fid:
-                        fid.write(str(task_index))
-
                     cfid.write('%s,%s,%d,%s\n' % (job, machine[0], machine[1],
                                                   GPU))
-                    task_index += 1
 
         #notify the machine that the cluster is ready
         fid = open(FLAGS.expdir + '/cluster/ready', 'w')
@@ -265,6 +270,20 @@ def main(_):
         print ('training has started look in %s/outputs for the job outputs' %
                FLAGS.expdir)
 
+        print 'waiting for worker jobs to finish'
+
+        for machine in machines['worker']:
+            machine_file = os.path.join(FLAGS.expdir, 'cluster',
+                                        '%s-%d' % (machine[0], machine[1]))
+            while os.path.exists(machine_file):
+                sleep(1)
+
+        #stop the ps jobs
+        with open(os.path.join(FLAGS.expdir, 'cluster', 'ps-cid')) as fid:
+            cid = fid.read()
+
+        subprocess.call(['condor_rm', cid])
+
     elif computing_cfg['distributed'] == 'condor_local':
 
         #create the directories
@@ -272,7 +291,7 @@ def main(_):
             os.makedirs(FLAGS.expdir + '/outputs')
 
         #create the cluster file
-        with open(FLAGS.expdir + '/cluster', 'w') as fid:
+        with open(FLAGS.expdir + '/clusterfile', 'w') as fid:
             port = 1024
             for _ in range(int(computing_cfg['numps'])):
                 while not cluster.port_available(port):

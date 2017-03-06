@@ -118,7 +118,9 @@ class BeamSearchDecoder(decoder.Decoder):
         negmax = tf.tile(
             [[-tf.float32.max]],
             [self.batch_size, int(self.conf['beam_width'])-1])
-        scores = tf.concat([tf.zeros([self.batch_size, 1]), negmax], 1)
+        scores = tf.concat(
+            [tf.zeros([self.batch_size, 1]), negmax], 1)
+
         lengths = tf.ones(
             [self.batch_size, int(self.conf['beam_width'])],
             dtype=tf.int32)
@@ -153,12 +155,12 @@ class BeamSearchDecoder(decoder.Decoder):
 
         with tf.variable_scope('cut_sequences'):
             #get the beam scores
-            scores = [tf.unpack(s) for s in tf.unpack(beam.scores)]
+            scores = [tf.unstack(s) for s in tf.unstack(beam.scores)]
 
             #cut the beam sequences to the correct length and take of
             #the sequence border tokens
-            sequences = [tf.unpack(s) for s in tf.unpack(beam.sequences)]
-            lengths = [tf.unpack(l) for l in tf.unpack(beam.lengths)]
+            sequences = [tf.unstack(s) for s in tf.unstack(beam.sequences)]
+            lengths = [tf.unstack(l) for l in tf.unstack(beam.lengths)]
             sequences = [[sequences[i][j][1:lengths[i][j]-1]
                           for j in range(len(lengths[i]))]
                          for i in range(len(lengths))]
@@ -180,10 +182,10 @@ class BeamSearchDecoder(decoder.Decoder):
             the score'''
 
         #decode the targets
-        for utt in targets:
-            targets[utt] = self.coder.decode(targets[utt])
+        decoded_targets = {utt:self.coder.decode(targets[utt])
+                                for utt in targets}
 
-        return score.cer(outputs, targets)
+        return score.cer(outputs, decoded_targets)
 
 
 class Beam(namedtuple('Beam', ['sequences', 'lengths', 'states', 'scores'])):
@@ -251,16 +253,18 @@ class Beam(namedtuple('Beam', ['sequences', 'lengths', 'states', 'scores'])):
                 full_finished = tf.reshape(
                     tf.tile(tf.expand_dims(finished, 2), [1, 1, numlabels]),
                     [batch_size, -1])
-                scores = tf.select(full_finished, oldscores, newscores)
+                scores = tf.where(full_finished, oldscores, newscores)
 
                 #set the scores of expanded beams from finished elements to
                 #negative maximum [batch_size x beam_width*numlabels]
-                expanded_finished = tf.reshape(tf.concat([tf.tile([[[False]]], [batch_size, beam_width, 1]),
-                        tf.tile(tf.expand_dims(finished, 2),
-                                [1, 1, numlabels-1])], 2)
+
+                expanded_finished = tf.reshape(tf.concat(
+                    [tf.tile([[[False]]], [batch_size, beam_width, 1]),
+                     tf.tile(tf.expand_dims(finished, 2),
+                             [1, 1, numlabels-1])], 2)
                                                , [batch_size, -1])
 
-                scores = tf.select(
+                scores = tf.where(
                     expanded_finished,
                     tf.tile([[-scores.dtype.max]],
                             [batch_size, numlabels*beam_width]),
@@ -270,7 +274,7 @@ class Beam(namedtuple('Beam', ['sequences', 'lengths', 'states', 'scores'])):
             with tf.variable_scope('lengths'):
                 #update the sequence lengths for the unfinshed beam elements
                 #[batch_size x beam_width]
-                lengths = tf.select(finished, self.lengths, self.lengths+1)
+                lengths = tf.where(finished, self.lengths, self.lengths+1)
 
                 #repeat the lengths for all expanded elements
                 #[batch_size x beam_width*numlabels]
@@ -305,7 +309,7 @@ class Beam(namedtuple('Beam', ['sequences', 'lengths', 'states', 'scores'])):
                 #put the selected label for the finished elements to zero
                 finished = tf.gather(tf.reshape(finished, [-1]),
                                      expanded_elements)
-                labels = tf.select(
+                labels = tf.where(
                     finished,
                     tf.tile([[numlabels-1]], [batch_size, beam_width]),
                     labels)
